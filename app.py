@@ -475,20 +475,8 @@ def ne():
 def sru():
     sales,costs,result,vals=totals();goods=sum(v for a,v in vals.items() if a.startswith("4"));ext=sum(v for a,v in vals.items() if a.startswith(("5","6","7")));fin=sum(v for a,v in vals.items() if a.startswith("8"))
     # Deliberately no claim that these lines are production-ready SRU field codes.
-    info="#GEN#
-#PROGRAM Min Bokföring v13
-#FORMAT PC8
-#FNAMN NE-underlag
-#NAMN Företag
-#EOF#
-"
-    blank=f"#BLANKETT NE
-#R1 {sales:.2f}
-#R5 {goods:.2f}
-#R6 {ext:.2f}
-#R8 {fin:.2f}
-#EOF#
-"
+    info="#GEN#\\n#PROGRAM Min Bokföring v13\\n#FORMAT PC8\\n#FNAMN NE-underlag\\n#NAMN Företag\\n#EOF#\\n"
+    blank=f"#BLANKETT NE\\n#R1 {sales:.2f}\\n#R5 {goods:.2f}\\n#R6 {ext:.2f}\\n#R8 {fin:.2f}\\n#EOF#\\n"
     open(os.path.join(EXPORT,"INFO.SRU"),"w",encoding="cp1252",errors="replace").write(info)
     open(os.path.join(EXPORT,"BLANKETTER.SRU"),"w",encoding="cp1252",errors="replace").write(blank)
     flash("SRU-underlag skapades i Data/Export. Det måste verifieras mot aktuell Skatteverket-specifikation innan inlämning.")
