@@ -159,30 +159,63 @@ def suggest(desc,amount):
 
 def parse_bank(data):
     text=None
-    for enc in ("cp1252","iso-8859-1","utf-8-sig","utf-8"):
-        try:text=data.decode(enc);break
-        except UnicodeDecodeError:pass
-    if text is None:raise ValueError("CSV kunde inte läsas.")
-    rows=list(csv.reader(io.StringIO(text),delimiter=","))
-    hi=None
-    for i,r in enumerate(rows[:30]):
-        n=[re.sub(r"[^a-z0-9]","",x.lower().replace("å","a").replace("ä","a").replace("ö","o")) for x in r]
-        if "bokfordag" in n and "belopp" in n and "bokfortsaldo" in n:hi=i;break
-    if hi is None:raise ValueError("Hittade inte kolumnrubrikerna från din bank.")
-    h=rows[hi]
-    def idx(w):
-        z=re.sub(r"[^a-z0-9]","",w.lower().replace("å","a").replace("ä","a").replace("ö","o"))
-        for i,x in enumerate(h):
-            if re.sub(r"[^a-z0-9]","",x.lower().replace("å","a").replace("ä","a").replace("ö","o"))==z:return i
-        return None
-    ib,ir,ide,ia,isal,ic=[idx(x) for x in ("Bokföringsdag","Referens","Beskrivning","Belopp","Bokfört saldo","Valuta")]
+    for enc in ("utf-8-sig","cp1252","iso-8859-1","utf-8"):
+        try:
+            text=data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            pass
+    if text is None:
+        raise ValueError("CSV kunde inte läsas.")
+
+    try:
+        delimiter=csv.Sniffer().sniff(text[:4096], delimiters=";,\\t").delimiter
+    except csv.Error:
+        delimiter=";"
+    rows=list(csv.reader(io.StringIO(text),delimiter=delimiter))
+    def normalize(value):
+        return re.sub(r"[^a-z0-9]","",value.lower().replace("å","a").replace("ä","a").replace("ö","o"))
+    aliases={
+        "date":{"bokfordag","bokforingsdag","bokforingsdatum","transaktionsdatum","datum","date"},
+        "amount":{"belopp","amount","transaktionsbelopp"},
+        "reference":{"referens","reference","verifikation","id"},
+        "description":{"beskrivning","text","meddelande","namn","transaktion"},
+        "balance":{"bokfortsaldo","saldo","balance"},
+        "currency":{"valuta","currency"},
+    }
+    header_index=None
+    columns={}
+    for index,row in enumerate(rows[:40]):
+        normalized=[normalize(value) for value in row]
+        found={}
+        for name,names in aliases.items():
+            found[name]=next((position for position,value in enumerate(normalized) if value in names),None)
+        if found["date"] is not None and found["amount"] is not None:
+            header_index=index
+            columns=found
+            break
+    if header_index is None:
+        raise ValueError("Hittade inte kolumner för datum och belopp i CSV-filen.")
+    log.info("bank_csv_detected", delimiter=delimiter, header_row=header_index + 1)
     out=[];errs=[]
-    for ln,r in enumerate(rows[hi+1:],hi+2):
-        if not any(x.strip() for x in r):continue
-        g=lambda i:r[i].strip() if i is not None and i<len(r) else ""
-        dt=g(ib);amt=money(g(ia))
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$",dt) or amt is None:errs.append(f"Rad {ln}");continue
-        out.append((dt,g(ir),g(ide) or "Banktransaktion",amt,money(g(isal)),g(ic) or "SEK"))
+    for line_number,row in enumerate(rows[header_index+1:],header_index+2):
+        if not any(value.strip() for value in row):
+            continue
+        value=lambda name: row[columns[name]].strip() if columns.get(name) is not None and columns[name] < len(row) else ""
+        raw_date=value("date")
+        date_match=re.search(r"(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})",raw_date)
+        if not date_match:
+            date_match=re.search(r"(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{4})",raw_date)
+            date=f"{date_match.group(3)}-{int(date_match.group(2)):02d}-{int(date_match.group(1)):02d}" if date_match else ""
+        else:
+            date=f"{date_match.group(1)}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+        amount=money(value("amount"))
+        if not date or amount is None:
+            errs.append(f"Rad {line_number}")
+            continue
+        out.append((date,value("reference"),value("description") or "Banktransaktion",amount,money(value("balance")),value("currency") or "SEK"))
+    if not out:
+        raise ValueError("Inga giltiga bankhändelser hittades. Kontrollera datum- och beloppskolumnerna.")
     return out,errs
 
 def ensure_vision_ocr():
@@ -302,15 +335,36 @@ def receipt_ocr(path):
         return ""
 
 def extract_receipt(text):
-    total=vat=0;dt=""
+    """Find likely total, VAT, and date values from Swedish or English receipt text."""
+    text=text or ""
+    total=vat=0
     log.debug("receipt_extraction_started", character_count=len(text))
-    for pat in (r"(?:total|summa|att betala|belopp)\D{0,20}(\d+[,.]\d{2})",r"(\d+[,.]\d{2})\s*(?:SEK|kr)"):
-        m=re.search(pat,text,re.I)
-        if m: total=money(m.group(1)) or 0;break
-    m=re.search(r"(?:moms|vat)\D{0,15}(\d+[,.]\d{2})",text,re.I)
-    if m:vat=money(m.group(1)) or 0
-    m=re.search(r"(\d{4}[-/.]\d{2}[-/.]\d{2})",text)
-    if m:dt=m.group(1).replace("/","-").replace(".","-")
+    amount_pattern=r"(\\d{1,7}(?:[,.]\\d{1,2})?)"
+    total_labels=r"(?:att\\s+betala|totalt(?:\\s+att\\s+betala)?|totalbelopp|summa(?:\\s+att\\s+betala)?|grand\\s+total|amount\\s+due|total)"
+    total_match=re.search(total_labels+r"[^0-9]{0,40}"+amount_pattern,text,re.I)
+    if total_match:
+        total=money(total_match.group(1)) or 0
+    if not total:
+        currency_amounts=[money(value) for value in re.findall(amount_pattern+r"\\s*(?:SEK|kr|EUR|USD)",text,re.I)]
+        currency_amounts=[value for value in currency_amounts if value is not None]
+        if currency_amounts:
+            total=max(currency_amounts)
+    vat_match=re.search(r"(?:moms|vat)(?:\\s*\\d{1,2}\\s*%)?[^0-9]{0,30}"+amount_pattern,text,re.I)
+    if vat_match:
+        vat=money(vat_match.group(1)) or 0
+    if total and not vat:
+        rate_match=re.search(r"(?:moms|vat)\\s*(25|12|6)\\s*%",text,re.I)
+        if rate_match:
+            rate=int(rate_match.group(1))
+            vat=round(total-total/(1+rate/100),2)
+    iso=re.search(r"(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})",text)
+    european=re.search(r"(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{4})",text)
+    if iso:
+        dt=f"{iso.group(1)}-{int(iso.group(2)):02d}-{int(iso.group(3)):02d}"
+    elif european:
+        dt=f"{european.group(3)}-{int(european.group(2)):02d}-{int(european.group(1)):02d}"
+    else:
+        dt=""
     log.info("receipt_extraction_completed", total_found=bool(total), vat_found=bool(vat), date_found=bool(dt))
     return total,vat,dt
 
@@ -475,10 +529,28 @@ def receipts():
     body=render_template_string("""<div class=card><h1>Kvitton</h1><form method=post enctype=multipart/form-data><input type=file name=receipt accept="image/*,.pdf" capture="environment" required> <button>Spara kvitto</button></form>
     <p class=muted>På Mac kan OCR kräva Tesseract. På mobil/enheter med kamera kan filfältet erbjuda kameran.</p></div>
     {%for r in rows%}<div class=card><b>{{r.filename}}</b><p>Datum: {{r.date or "–"}} · Summa: {{r.total or "–"}} · Moms: {{r.vat or "–"}}</p><p class=muted>OCR: {{"Text hittades" if r.ocr_text else "Ingen text kunde läsas"}}</p>
+    <form method=post action="/receipt/{{r.id}}/edit"><label>Datum <input type=date name=date value="{{r.date or ''}}"></label> <label>Summa <input name=total value="{{r.total or ''}}" inputmode=decimal></label> <label>Moms <input name=vat value="{{r.vat or ''}}" inputmode=decimal></label> <button>Spara värden</button></form>
     {%if r.ocr_text%}<details><summary>OCR-text</summary><pre>{{r.ocr_text[:1500]}}</pre></details>{%endif%}
     {%if r.total and r.total > 0%}<form method=post action="/receipt/{{r.id}}/book"><select name=account>{%for a,n in accounts.items()%}<option value="{{a}}" {%if a=="6990"%}selected{%endif%}>{{a}} – {{n}}</option>{%endfor%}</select>
     <select name=vat><option value=25>25 % moms</option><option value=12>12 % moms</option><option value=6>6 % moms</option><option value=0>Ingen moms</option></select><button>Granska & bokför</button></form>{%endif%}</div>{%endfor%}""",rows=rows,accounts=AC)
     return render_template_string(HTML,body=body)
+
+@app.route("/receipt/<int:receipt_id>/edit",methods=["POST"])
+def edit_receipt(receipt_id):
+    c=conn(); receipt=c.execute("select id from receipts where id=?",(receipt_id,)).fetchone()
+    if not receipt:
+        flash("Kvittot hittades inte.")
+        return redirect(url_for("receipts"))
+    date=request.form.get("date","").strip()
+    total=money(request.form.get("total",""))
+    vat=money(request.form.get("vat",""))
+    if total is None or total < 0 or vat is None or vat < 0:
+        flash("Summa och moms måste vara giltiga belopp.")
+        return redirect(url_for("receipts"))
+    c.execute("update receipts set date=?,total=?,vat=? where id=?",(date,total,vat,receipt_id));c.commit()
+    log.info("receipt_values_updated", receipt_id=receipt_id)
+    flash("Kvittovärden uppdaterade.")
+    return redirect(url_for("receipts"))
 
 @app.route("/receipt/<int:receipt_id>/book",methods=["POST"])
 def book_receipt(receipt_id):
