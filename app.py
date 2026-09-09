@@ -1,4 +1,4 @@
-import os, io, csv, json, re, sqlite3, hashlib, datetime, threading, zipfile, shutil
+import os, io, csv, json, re, sqlite3, hashlib, datetime, threading, zipfile, shutil, subprocess, sys
 import structlog
 from decimal import Decimal, InvalidOperation
 from flask import Flask, request, redirect, render_template_string, flash, url_for, send_file
@@ -27,6 +27,10 @@ structlog.configure(
 )
 log=structlog.get_logger("min_bokforing")
 log.info("application_started", data_directory=DATA)
+VISION_OCR_SOURCE=os.path.join(ROOT, "ocr_macos.swift")
+VISION_OCR_BINARY=os.path.join(ROOT, ".ocr_macos")
+VISION_OCR_LOCK=threading.Lock()
+VISION_OCR_READY=None
 
 @app.before_request
 def log_request():
@@ -175,17 +179,86 @@ def parse_bank(data):
         out.append((dt,g(ir),g(ide) or "Banktransaktion",amt,money(g(isal)),g(ic) or "SEK"))
     return out,errs
 
+def ensure_vision_ocr():
+    """Build the local macOS Vision helper once, only when it is needed."""
+    global VISION_OCR_READY
+    if VISION_OCR_READY is not None:
+        return VISION_OCR_READY
+    with VISION_OCR_LOCK:
+        if VISION_OCR_READY is not None:
+            return VISION_OCR_READY
+        if sys.platform != "darwin":
+            log.info("vision_ocr_skipped", reason="not_macos")
+            VISION_OCR_READY=False
+            return False
+        if os.path.isfile(VISION_OCR_BINARY):
+            log.info("vision_ocr_ready", source="existing_binary")
+            VISION_OCR_READY=True
+            return True
+        if not os.path.isfile(VISION_OCR_SOURCE):
+            log.error("vision_ocr_unavailable", reason="helper_source_missing")
+            VISION_OCR_READY=False
+            return False
+        log.info("vision_ocr_build_started")
+        try:
+            result=subprocess.run(
+                ["xcrun", "swiftc", VISION_OCR_SOURCE, "-o", VISION_OCR_BINARY,
+                 "-framework", "Vision"],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            log.exception("vision_ocr_build_failed")
+            VISION_OCR_READY=False
+            return False
+        if result.returncode != 0:
+            log.error(
+                "vision_ocr_build_failed",
+                return_code=result.returncode,
+                compiler_output=result.stderr[-1000:],
+            )
+            VISION_OCR_READY=False
+            return False
+        log.info("vision_ocr_build_completed")
+        VISION_OCR_READY=True
+        return True
+
+def vision_ocr(path):
+    if not ensure_vision_ocr():
+        return ""
+    log.info("vision_ocr_started", file_extension=os.path.splitext(path)[1].lower())
+    try:
+        result=subprocess.run(
+            [VISION_OCR_BINARY, path], capture_output=True, text=True,
+            timeout=60, check=False,
+        )
+        if result.returncode != 0:
+            log.error("vision_ocr_failed", return_code=result.returncode, error_output=result.stderr[-1000:])
+            return ""
+        payload=json.loads(result.stdout)
+        text=payload.get("text", "")
+        if not isinstance(text, str):
+            log.error("vision_ocr_failed", reason="invalid_response")
+            return ""
+        log.info("vision_ocr_completed", character_count=len(text))
+        return text
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        log.exception("vision_ocr_failed")
+        return ""
+
 def receipt_ocr(path):
+    text=vision_ocr(path)
+    if text:
+        return text
     if Image is None or pytesseract is None:
         log.warning("ocr_unavailable", image_available=Image is not None, tesseract_available=pytesseract is not None)
         return ""
-    log.info("ocr_started", file_extension=os.path.splitext(path)[1].lower())
+    log.info("tesseract_ocr_started", file_extension=os.path.splitext(path)[1].lower())
     try:
         text=pytesseract.image_to_string(Image.open(path),lang="swe+eng")
-        log.info("ocr_completed", character_count=len(text))
+        log.info("tesseract_ocr_completed", character_count=len(text))
         return text
     except Exception:
-        log.exception("ocr_failed", file_extension=os.path.splitext(path)[1].lower())
+        log.exception("tesseract_ocr_failed", file_extension=os.path.splitext(path)[1].lower())
         return ""
 
 def extract_receipt(text):
