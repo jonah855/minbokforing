@@ -1,4 +1,4 @@
-import os, io, csv, json, re, sqlite3, hashlib, datetime, threading, zipfile, shutil, subprocess, sys
+import os, io, csv, json, re, sqlite3, hashlib, datetime, threading, zipfile, shutil, subprocess, sys, tempfile
 import structlog
 from decimal import Decimal, InvalidOperation
 from flask import Flask, request, redirect, render_template_string, flash, url_for, send_file
@@ -10,6 +10,12 @@ try:
 except Exception: Image=None; pytesseract=None
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+try:
+    from pypdf import PdfReader
+except Exception: PdfReader=None
+try:
+    import fitz
+except Exception: fitz=None
 
 ROOT=os.path.dirname(os.path.abspath(__file__))
 DATA=os.path.join(ROOT,"Data"); RECEIPTS=os.path.join(DATA,"Kvitton"); EXPORT=os.path.join(DATA,"Export"); BACKUPS=os.path.join(DATA,"Backups")
@@ -245,20 +251,54 @@ def vision_ocr(path):
         log.exception("vision_ocr_failed")
         return ""
 
+def pdf_receipt_text(path):
+    """Read embedded PDF text, or render scanned PDF pages for local Vision OCR."""
+    if PdfReader is not None:
+        try:
+            reader=PdfReader(path)
+            text="\n".join((page.extract_text() or "") for page in reader.pages[:3]).strip()
+            if text:
+                log.info("pdf_text_extracted", character_count=len(text))
+                return text
+        except Exception:
+            log.exception("pdf_text_extraction_failed")
+    if fitz is None:
+        log.error("pdf_ocr_unavailable", reason="pymupdf_not_installed")
+        return ""
+    try:
+        parts=[]
+        document=fitz.open(path)
+        with tempfile.TemporaryDirectory(prefix="min_bokforing_pdf_") as temp_dir:
+            for page_number in range(min(len(document), 3)):
+                image_path=os.path.join(temp_dir, f"page_{page_number + 1}.png")
+                document.load_page(page_number).get_pixmap(dpi=200, alpha=False).save(image_path)
+                page_text=vision_ocr(image_path)
+                if page_text:
+                    parts.append(page_text)
+        text="\n".join(parts)
+        log.info("pdf_render_ocr_completed", page_count=min(len(document), 3), character_count=len(text))
+        return text
+    except Exception:
+        log.exception("pdf_render_ocr_failed")
+        return ""
+
 def receipt_ocr(path):
+    extension=os.path.splitext(path)[1].lower()
+    if extension==".pdf":
+        return pdf_receipt_text(path)
     text=vision_ocr(path)
     if text:
         return text
     if Image is None or pytesseract is None:
         log.warning("ocr_unavailable", image_available=Image is not None, tesseract_available=pytesseract is not None)
         return ""
-    log.info("tesseract_ocr_started", file_extension=os.path.splitext(path)[1].lower())
+    log.info("tesseract_ocr_started", file_extension=extension)
     try:
         text=pytesseract.image_to_string(Image.open(path),lang="swe+eng")
         log.info("tesseract_ocr_completed", character_count=len(text))
         return text
     except Exception:
-        log.exception("tesseract_ocr_failed", file_extension=os.path.splitext(path)[1].lower())
+        log.exception("tesseract_ocr_failed", file_extension=extension)
         return ""
 
 def extract_receipt(text):
@@ -417,7 +457,7 @@ def receipts():
         data=f.read();sha=hashlib.sha256(data).hexdigest();ext=os.path.splitext(f.filename)[1].lower() or ".jpg";path=os.path.join(RECEIPTS,sha+ext)
         log.info("receipt_upload_received", byte_count=len(data), file_extension=ext, content_hash_prefix=sha[:12])
         open(path,"wb").write(data);log.info("receipt_file_saved", byte_count=len(data), file_extension=ext)
-        text=receipt_ocr(path) if ext not in (".pdf",) else "";total,vat,dt=extract_receipt(text)
+        text=receipt_ocr(path);total,vat,dt=extract_receipt(text)
         try:
             c.execute("""insert into receipts(filename,path,sha256,date,total,vat,currency,ocr_text,created)
                          values(?,?,?,?,?,?,?,?,?)""",(f.filename,path,sha,dt,total,vat,"SEK",text,datetime.datetime.now().isoformat()));c.commit()
@@ -435,8 +475,35 @@ def receipts():
     body=render_template_string("""<div class=card><h1>Kvitton</h1><form method=post enctype=multipart/form-data><input type=file name=receipt accept="image/*,.pdf" capture="environment" required> <button>Spara kvitto</button></form>
     <p class=muted>På Mac kan OCR kräva Tesseract. På mobil/enheter med kamera kan filfältet erbjuda kameran.</p></div>
     {%for r in rows%}<div class=card><b>{{r.filename}}</b><p>Datum: {{r.date or "–"}} · Summa: {{r.total or "–"}} · Moms: {{r.vat or "–"}}</p><p class=muted>OCR: {{"Text hittades" if r.ocr_text else "Ingen text kunde läsas"}}</p>
-    {%if r.ocr_text%}<details><summary>OCR-text</summary><pre>{{r.ocr_text[:1500]}}</pre></details>{%endif%}</div>{%endfor%}""",rows=rows)
+    {%if r.ocr_text%}<details><summary>OCR-text</summary><pre>{{r.ocr_text[:1500]}}</pre></details>{%endif%}
+    {%if r.total and r.total > 0%}<form method=post action="/receipt/{{r.id}}/book"><select name=account>{%for a,n in accounts.items()%}<option value="{{a}}" {%if a=="6990"%}selected{%endif%}>{{a}} – {{n}}</option>{%endfor%}</select>
+    <select name=vat><option value=25>25 % moms</option><option value=12>12 % moms</option><option value=6>6 % moms</option><option value=0>Ingen moms</option></select><button>Granska & bokför</button></form>{%endif%}</div>{%endfor%}""",rows=rows,accounts=AC)
     return render_template_string(HTML,body=body)
+
+@app.route("/receipt/<int:receipt_id>/book",methods=["POST"])
+def book_receipt(receipt_id):
+    c=conn(); receipt=c.execute("select * from receipts where id=?",(receipt_id,)).fetchone()
+    if not receipt or not receipt["total"] or receipt["total"] <= 0:
+        flash("Kvitto saknar giltig summa. Fyll i uppgifterna manuellt i en ny verifikation.")
+        return redirect(url_for("receipts"))
+    account=request.form.get("account","6990")
+    vat_rate=int(request.form.get("vat","0"))
+    if account not in AC:
+        flash("Välj ett giltigt konto.")
+        return redirect(url_for("receipts"))
+    amount=abs(float(receipt["total"]))
+    if vat_rate in (25,12,6):
+        net=round(amount/(1+vat_rate/100),2); vat_amount=round(amount-net,2)
+        lines=[(account,net,0,""),("2641",vat_amount,0,str(vat_rate)),("1930",0,amount,"")]
+    else:
+        lines=[(account,amount,0,""),("1930",0,amount,"")]
+    try:
+        create_voucher(receipt["date"] or datetime.date.today().isoformat(),"Kvitto: "+receipt["filename"],"receipt",None,receipt_id,lines)
+        flash("Kvitto bokfört som verifikation.")
+    except Exception as e:
+        log.exception("receipt_booking_failed", receipt_id=receipt_id)
+        flash("Kunde inte bokföra kvittot: "+str(e))
+    return redirect(url_for("journal"))
 
 @app.route("/journal")
 def journal():
