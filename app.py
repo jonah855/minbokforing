@@ -68,7 +68,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px so
 .pill{display:inline-block;padding:4px 8px;border-radius:10px;background:#eee;font-size:12px}.actions{display:flex;gap:8px;flex-wrap:wrap}
 @media(max-width:850px){.grid{grid-template-columns:1fr 1fr}}
 </style></head><body>
-<nav><b>Min Bokföring v13</b>　<a href="/">Översikt</a><a href="/bank">Händelser</a><a href="/journal">Verifikationer</a><a href="/receipts">Kvitton</a><a href="/vat">Moms</a><a href="/reports">Rapporter</a><a href="/close">Bokslut</a><a href="/ne">NE/SRU</a><a href="/settings">Inställningar</a><a href="/backup">Backup</a></nav>
+<nav><b>Min Bokföring v13</b>　<a href="/">Översikt</a><a href="/bank">Händelser</a><a href="/journal">Verifikationer</a><a href="/manual">Ny verifikation</a><a href="/receipts">Kvitton</a><a href="/vat">Moms</a><a href="/reports">Rapporter</a><a href="/close">Bokslut</a><a href="/ne">NE/SRU</a><a href="/settings">Inställningar</a><a href="/backup">Backup</a></nav>
 <main>{% for m in get_flashed_messages() %}<div class=card good>{{m}}</div>{% endfor %}{{body|safe}}</main></body></html>"""
 
 def conn():
@@ -110,7 +110,7 @@ def audit(action,obj,oid,details):
 def money(v):
     s=str(v or "").strip().replace(" ","").replace(" ","")
     if not s:return None
-    s=re.sub(r"[^0-9,.\\-+]","",s)
+    s=re.sub(r"[^0-9,.\-+]","",s)
     if "," in s and "." in s:
         s=s.replace(".","").replace(",",".") if s.rfind(",")>s.rfind(".") else s.replace(",","")
     elif "," in s:s=s.replace(",",".")
@@ -175,7 +175,7 @@ def parse_bank(data):
         if not any(x.strip() for x in r):continue
         g=lambda i:r[i].strip() if i is not None and i<len(r) else ""
         dt=g(ib);amt=money(g(ia))
-        if not re.match(r"^\\d{4}-\\d{2}-\\d{2}$",dt) or amt is None:errs.append(f"Rad {ln}");continue
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$",dt) or amt is None:errs.append(f"Rad {ln}");continue
         out.append((dt,g(ir),g(ide) or "Banktransaktion",amt,money(g(isal)),g(ic) or "SEK"))
     return out,errs
 
@@ -264,12 +264,12 @@ def receipt_ocr(path):
 def extract_receipt(text):
     total=vat=0;dt=""
     log.debug("receipt_extraction_started", character_count=len(text))
-    for pat in (r"(?:total|summa|att betala|belopp)\\D{0,20}(\\d+[,.]\\d{2})",r"(\\d+[,.]\\d{2})\\s*(?:SEK|kr)"):
+    for pat in (r"(?:total|summa|att betala|belopp)\D{0,20}(\d+[,.]\d{2})",r"(\d+[,.]\d{2})\s*(?:SEK|kr)"):
         m=re.search(pat,text,re.I)
         if m: total=money(m.group(1)) or 0;break
-    m=re.search(r"(?:moms|vat)\\D{0,15}(\\d+[,.]\\d{2})",text,re.I)
+    m=re.search(r"(?:moms|vat)\D{0,15}(\d+[,.]\d{2})",text,re.I)
     if m:vat=money(m.group(1)) or 0
-    m=re.search(r"(\\d{4}[-/.]\\d{2}[-/.]\\d{2})",text)
+    m=re.search(r"(\d{4}[-/.]\d{2}[-/.]\d{2})",text)
     if m:dt=m.group(1).replace("/","-").replace(".","-")
     log.info("receipt_extraction_completed", total_found=bool(total), vat_found=bool(vat), date_found=bool(dt))
     return total,vat,dt
@@ -371,6 +371,41 @@ def book(tid):
     except Exception as e:flash("Fel: "+str(e))
     return redirect(url_for("bank"))
 
+@app.route("/manual",methods=["GET","POST"])
+def manual_voucher():
+    if request.method=="POST":
+        date=request.form.get("date","").strip()
+        text=request.form.get("text","").strip()
+        debit_account=request.form.get("debit_account","")
+        credit_account=request.form.get("credit_account","")
+        amount=money(request.form.get("amount",""))
+        if not date or not text or debit_account not in AC or credit_account not in AC or amount is None or amount <= 0:
+            flash("Fyll i datum, beskrivning, två konton och ett belopp större än 0.")
+            return redirect(url_for("manual_voucher"))
+        try:
+            voucher_id=create_voucher(
+                date, text, "manual", None, None,
+                [(debit_account, amount, 0, ""), (credit_account, 0, amount, "")]
+            )
+            log.info("manual_voucher_created", voucher_id=voucher_id)
+            flash("Manuell verifikation sparad och låst.")
+            return redirect(url_for("journal"))
+        except Exception as e:
+            log.exception("manual_voucher_failed")
+            flash("Kunde inte spara verifikationen: "+str(e))
+            return redirect(url_for("manual_voucher"))
+    body=render_template_string("""<div class=card><h1>Ny manuell verifikation</h1>
+    <p class=muted>Skapa en enkel verifikation med ett debetkonto och ett kreditkonto. Kontrollera alltid konteringen innan du sparar.</p>
+    <form method=post>
+    <p><label>Datum</label><br><input type=date name=date value="{{today}}" required></p>
+    <p><label>Beskrivning</label><br><input name=text required></p>
+    <p><label>Debetkonto</label><br><select name=debit_account required>{%for a,n in accounts.items()%}<option value="{{a}}">{{a}} – {{n}}</option>{%endfor%}</select></p>
+    <p><label>Kreditkonto</label><br><select name=credit_account required>{%for a,n in accounts.items()%}<option value="{{a}}">{{a}} – {{n}}</option>{%endfor%}</select></p>
+    <p><label>Belopp inkl. moms</label><br><input name=amount inputmode=decimal placeholder="0,00" required> kr</p>
+    <button>Spara verifikation</button></form></div>""",
+    accounts=AC,today=datetime.date.today().isoformat())
+    return render_template_string(HTML,body=body)
+
 @app.route("/receipts",methods=["GET","POST"])
 def receipts():
     c=conn()
@@ -391,12 +426,15 @@ def receipts():
             flash("Samma kvitto finns redan.")
         else:
             log.info("receipt_record_created", content_hash_prefix=sha[:12], ocr_character_count=len(text))
-            flash("Kvitto sparat. Kontrollera OCR-värden innan bokföring.")
+            if text:
+                flash("Kvitto sparat. OCR-text hittades – kontrollera datum, summa och moms.")
+            else:
+                flash("Kvitto sparat, men OCR kunde inte läsa texten. Du kan ändå skapa en manuell verifikation.")
         return redirect(url_for("receipts"))
     rows=c.execute("select * from receipts order by id desc").fetchall()
     body=render_template_string("""<div class=card><h1>Kvitton</h1><form method=post enctype=multipart/form-data><input type=file name=receipt accept="image/*,.pdf" capture="environment" required> <button>Spara kvitto</button></form>
     <p class=muted>På Mac kan OCR kräva Tesseract. På mobil/enheter med kamera kan filfältet erbjuda kameran.</p></div>
-    {%for r in rows%}<div class=card><b>{{r.filename}}</b><p>Datum: {{r.date or "–"}} · Summa: {{r.total or "–"}} · Moms: {{r.vat or "–"}}</p>
+    {%for r in rows%}<div class=card><b>{{r.filename}}</b><p>Datum: {{r.date or "–"}} · Summa: {{r.total or "–"}} · Moms: {{r.vat or "–"}}</p><p class=muted>OCR: {{"Text hittades" if r.ocr_text else "Ingen text kunde läsas"}}</p>
     {%if r.ocr_text%}<details><summary>OCR-text</summary><pre>{{r.ocr_text[:1500]}}</pre></details>{%endif%}</div>{%endfor%}""",rows=rows)
     return render_template_string(HTML,body=body)
 
@@ -475,8 +513,8 @@ def ne():
 def sru():
     sales,costs,result,vals=totals();goods=sum(v for a,v in vals.items() if a.startswith("4"));ext=sum(v for a,v in vals.items() if a.startswith(("5","6","7")));fin=sum(v for a,v in vals.items() if a.startswith("8"))
     # Deliberately no claim that these lines are production-ready SRU field codes.
-    info="#GEN#\\n#PROGRAM Min Bokföring v13\\n#FORMAT PC8\\n#FNAMN NE-underlag\\n#NAMN Företag\\n#EOF#\\n"
-    blank=f"#BLANKETT NE\\n#R1 {sales:.2f}\\n#R5 {goods:.2f}\\n#R6 {ext:.2f}\\n#R8 {fin:.2f}\\n#EOF#\\n"
+    info="#GEN#\n#PROGRAM Min Bokföring v13\n#FORMAT PC8\n#FNAMN NE-underlag\n#NAMN Företag\n#EOF#\n"
+    blank=f"#BLANKETT NE\n#R1 {sales:.2f}\n#R5 {goods:.2f}\n#R6 {ext:.2f}\n#R8 {fin:.2f}\n#EOF#\n"
     open(os.path.join(EXPORT,"INFO.SRU"),"w",encoding="cp1252",errors="replace").write(info)
     open(os.path.join(EXPORT,"BLANKETTER.SRU"),"w",encoding="cp1252",errors="replace").write(blank)
     flash("SRU-underlag skapades i Data/Export. Det måste verifieras mot aktuell Skatteverket-specifikation innan inlämning.")
