@@ -1,0 +1,13 @@
+# Private local accounting data
+/Data/
+
+# Python environment and generated files
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+
+# Local OS files
+.DS_Store
