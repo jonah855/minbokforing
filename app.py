@@ -106,7 +106,7 @@ def audit(action,obj,oid,details):
 def money(v):
     s=str(v or "").strip().replace(" ","").replace(" ","")
     if not s:return None
-    s=re.sub(r"[^0-9,.-+]","",s)
+    s=re.sub(r"[^0-9,.\\-+]","",s)
     if "," in s and "." in s:
         s=s.replace(".","").replace(",",".") if s.rfind(",")>s.rfind(".") else s.replace(",","")
     elif "," in s:s=s.replace(",",".")
