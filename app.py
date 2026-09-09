@@ -1,4 +1,5 @@
 import os, io, csv, json, re, sqlite3, hashlib, datetime, threading, zipfile, shutil
+import structlog
 from decimal import Decimal, InvalidOperation
 from flask import Flask, request, redirect, render_template_string, flash, url_for, send_file
 try: import webview
@@ -15,6 +16,26 @@ DATA=os.path.join(ROOT,"Data"); RECEIPTS=os.path.join(DATA,"Kvitton"); EXPORT=os
 for p in (DATA,RECEIPTS,EXPORT,BACKUPS): os.makedirs(p,exist_ok=True)
 DB=os.path.join(DATA,"bokforing.db")
 app=Flask(__name__); app.secret_key="v13-local"
+
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.dev.ConsoleRenderer(),
+    ],
+)
+log=structlog.get_logger("min_bokforing")
+log.info("application_started", data_directory=DATA)
+
+@app.before_request
+def log_request():
+    log.info(
+        "http_request",
+        method=request.method,
+        path=request.path,
+        content_length=request.content_length or 0,
+    )
 
 # K1 chart supplied by BAS concept for sole proprietors using simplified annual accounts.
 # The app deliberately keeps the chart editable instead of pretending every company uses identical accounts.
@@ -47,6 +68,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px so
 <main>{% for m in get_flashed_messages() %}<div class=card good>{{m}}</div>{% endfor %}{{body|safe}}</main></body></html>"""
 
 def conn():
+    log.debug("database_opening", database=DB)
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     c.execute("""CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT)""")
@@ -66,7 +88,7 @@ def conn():
       id INTEGER PRIMARY KEY AUTOINCREMENT,created TEXT,action TEXT,object_type TEXT,object_id INTEGER,details TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS corrections(
       id INTEGER PRIMARY KEY AUTOINCREMENT,old_voucher INTEGER,new_voucher INTEGER,reason TEXT,created TEXT)""")
-    c.commit(); return c
+    c.commit(); log.debug("database_ready"); return c
 
 def setting(k,default=""):
     c=conn(); r=c.execute("select v from settings where k=?",(k,)).fetchone()
@@ -74,10 +96,12 @@ def setting(k,default=""):
 
 def set_setting(k,v):
     c=conn(); c.execute("insert into settings(k,v) values(?,?) on conflict(k) do update set v=excluded.v",(k,str(v))); c.commit()
+    log.info("setting_saved", setting=k)
 
 def audit(action,obj,oid,details):
     c=conn(); c.execute("insert into audit(created,action,object_type,object_id,details) values(?,?,?,?,?)",
                          (datetime.datetime.now().isoformat(),action,obj,oid,details)); c.commit()
+    log.info("audit_recorded", action=action, object_type=obj, object_id=oid)
 
 def money(v):
     s=str(v or "").strip().replace(" ","").replace(" ","")
@@ -110,6 +134,7 @@ def create_voucher(date,text,source,transaction_id,receipt_id,lines):
     if receipt_id:
         c.execute("update receipts set matched_tx=? where id=?",(transaction_id,receipt_id))
     c.commit(); audit("BOKFÖR","voucher",vid,f"V{v}: {text}")
+    log.info("voucher_created", voucher_id=vid, voucher_number=v, source=source, line_count=len(lines))
     return vid
 
 def suggest(desc,amount):
@@ -146,24 +171,34 @@ def parse_bank(data):
         if not any(x.strip() for x in r):continue
         g=lambda i:r[i].strip() if i is not None and i<len(r) else ""
         dt=g(ib);amt=money(g(ia))
-        if not re.match(r"^d{4}-d{2}-d{2}$",dt) or amt is None:errs.append(f"Rad {ln}");continue
+        if not re.match(r"^\\d{4}-\\d{2}-\\d{2}$",dt) or amt is None:errs.append(f"Rad {ln}");continue
         out.append((dt,g(ir),g(ide) or "Banktransaktion",amt,money(g(isal)),g(ic) or "SEK"))
     return out,errs
 
 def receipt_ocr(path):
-    if Image is None or pytesseract is None:return ""
-    try:return pytesseract.image_to_string(Image.open(path),lang="swe+eng")
-    except Exception:return ""
+    if Image is None or pytesseract is None:
+        log.warning("ocr_unavailable", image_available=Image is not None, tesseract_available=pytesseract is not None)
+        return ""
+    log.info("ocr_started", file_extension=os.path.splitext(path)[1].lower())
+    try:
+        text=pytesseract.image_to_string(Image.open(path),lang="swe+eng")
+        log.info("ocr_completed", character_count=len(text))
+        return text
+    except Exception:
+        log.exception("ocr_failed", file_extension=os.path.splitext(path)[1].lower())
+        return ""
 
 def extract_receipt(text):
     total=vat=0;dt=""
-    for pat in (r"(?:total|summa|att betala|belopp)D{0,20}(d+[,.]d{2})",r"(d+[,.]d{2})s*(?:SEK|kr)"):
+    log.debug("receipt_extraction_started", character_count=len(text))
+    for pat in (r"(?:total|summa|att betala|belopp)\\D{0,20}(\\d+[,.]\\d{2})",r"(\\d+[,.]\\d{2})\\s*(?:SEK|kr)"):
         m=re.search(pat,text,re.I)
         if m: total=money(m.group(1)) or 0;break
-    m=re.search(r"(?:moms|vat)D{0,15}(d+[,.]d{2})",text,re.I)
+    m=re.search(r"(?:moms|vat)\\D{0,15}(\\d+[,.]\\d{2})",text,re.I)
     if m:vat=money(m.group(1)) or 0
-    m=re.search(r"(d{4}[-/.]d{2}[-/.]d{2})",text)
+    m=re.search(r"(\\d{4}[-/.]\\d{2}[-/.]\\d{2})",text)
     if m:dt=m.group(1).replace("/","-").replace(".","-")
+    log.info("receipt_extraction_completed", total_found=bool(total), vat_found=bool(vat), date_found=bool(dt))
     return total,vat,dt
 
 def verify_chain():
@@ -228,6 +263,7 @@ def imp():
                 values(?,?,?,?,?,?,?,?,?,?,?,?)""",(key,dt,ref,desc,amt,bal,cur,"CSV: "+f.filename,"new",acc,vat,""));new+=1
             except sqlite3.IntegrityError:skip+=1
         c.commit();audit("IMPORTERA","bank",0,f"{f.filename}: {new} nya, {skip} dubbletter")
+        log.info("bank_import_completed", imported_count=new, duplicate_count=skip, invalid_row_count=len(errs))
         flash(f"Import klar: {new} nya, {skip} dubbletter, {len(errs)} felrader.");return redirect(url_for("bank"))
     body="""<div class=card><h1>Importera bank</h1><form method=post enctype=multipart/form-data>
     <input type=file name=file accept=.csv required><button>Importera CSV</button></form><p class=muted>Importeraren är anpassad för CSV-formatet du använde i tidigare versioner.</p></div>"""
@@ -267,14 +303,22 @@ def receipts():
     c=conn()
     if request.method=="POST":
         f=request.files.get("receipt")
-        if not f:return redirect(url_for("receipts"))
+        if not f:
+            log.warning("receipt_upload_missing_file")
+            return redirect(url_for("receipts"))
         data=f.read();sha=hashlib.sha256(data).hexdigest();ext=os.path.splitext(f.filename)[1].lower() or ".jpg";path=os.path.join(RECEIPTS,sha+ext)
-        open(path,"wb").write(data);text=receipt_ocr(path) if ext not in (".pdf",) else "";total,vat,dt=extract_receipt(text)
+        log.info("receipt_upload_received", byte_count=len(data), file_extension=ext, content_hash_prefix=sha[:12])
+        open(path,"wb").write(data);log.info("receipt_file_saved", byte_count=len(data), file_extension=ext)
+        text=receipt_ocr(path) if ext not in (".pdf",) else "";total,vat,dt=extract_receipt(text)
         try:
             c.execute("""insert into receipts(filename,path,sha256,date,total,vat,currency,ocr_text,created)
                          values(?,?,?,?,?,?,?,?,?)""",(f.filename,path,sha,dt,total,vat,"SEK",text,datetime.datetime.now().isoformat()));c.commit()
-        except sqlite3.IntegrityError:flash("Samma kvitto finns redan.")
-        else:flash("Kvitto sparat. Kontrollera OCR-värden innan bokföring.")
+        except sqlite3.IntegrityError:
+            log.warning("receipt_duplicate", content_hash_prefix=sha[:12])
+            flash("Samma kvitto finns redan.")
+        else:
+            log.info("receipt_record_created", content_hash_prefix=sha[:12], ocr_character_count=len(text))
+            flash("Kvitto sparat. Kontrollera OCR-värden innan bokföring.")
         return redirect(url_for("receipts"))
     rows=c.execute("select * from receipts order by id desc").fetchall()
     body=render_template_string("""<div class=card><h1>Kvitton</h1><form method=post enctype=multipart/form-data><input type=file name=receipt accept="image/*,.pdf" capture="environment" required> <button>Spara kvitto</button></form>
