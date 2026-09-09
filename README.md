@@ -31,8 +31,12 @@ V13 väljer därför inte automatiskt K1 åt dig.
 
 ## OCR
 
-För OCR på Mac kan Tesseract behöva installeras:
+På macOS använder appen i första hand Apples inbyggda Vision-ramverk för lokal OCR av HEIC, JPG och PNG. Hjälpprogrammet byggs första gången ett kvitto läses och kräver Apples Command Line Tools.
+
+Om Vision inte kan användas faller appen tillbaka till Tesseract, som kan installeras med:
 
 ```sh
 brew install tesseract tesseract-lang
 ```
+
+OCR-förloppet skrivs till Terminalen så att problem kan felsökas utan att kvittots innehåll loggas.
