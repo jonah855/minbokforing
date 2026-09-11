@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile Python files
-        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py nav_upgrade.py run.py
+        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py invoice_pdf_fix.py nav_upgrade.py run.py
       - name: Import full application
         run: |
           python - <<'PY'
@@ -27,10 +27,12 @@ jobs:
           from invoice_upgrade import register_invoice_upgrade
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
+          from invoice_pdf_fix import register_invoice_pdf_fix
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
+          register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
           print('IMPORT_OK')
           PY
       - name: Flask smoke, invoice and payment test
@@ -41,10 +43,12 @@ jobs:
           from invoice_upgrade import register_invoice_upgrade
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
+          from invoice_pdf_fix import register_invoice_pdf_fix
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
+          register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
           client = app.app.test_client()
           for path in ['/', '/customers', '/articles', '/invoices', '/quotes', '/invoice-settings', '/invoices/new', '/invoice-payments']:
               response = client.get(path)
