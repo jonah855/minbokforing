@@ -4,10 +4,12 @@ from features import register_features
 from invoice_upgrade import register_invoice_upgrade
 from invoice_hardening import register_invoice_hardening
 from nav_upgrade import register_navigation_upgrade
+from invoice_payment_upgrade import register_invoice_payment_upgrade
 
 register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
 register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
 register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
+register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
 register_navigation_upgrade()
 
 if __name__ == '__main__':
