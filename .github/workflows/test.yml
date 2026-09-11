@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile Python files
-        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py invoice_pdf_fix.py nav_upgrade.py ui_consistency.py run.py
+        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py invoice_pdf_fix.py invoice_customer_fix.py nav_upgrade.py ui_consistency.py run.py
       - name: Import full application
         run: |
           python - <<'PY'
@@ -28,6 +28,7 @@ jobs:
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
           from invoice_pdf_fix import register_invoice_pdf_fix
+          from invoice_customer_fix import register_invoice_customer_fix
           from nav_upgrade import register_navigation_upgrade
           from ui_consistency import register_ui_consistency
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
@@ -35,6 +36,7 @@ jobs:
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
+          register_invoice_customer_fix(app.app, app.conn)
           register_navigation_upgrade()
           register_ui_consistency(app.app)
           print('IMPORT_OK')
@@ -48,6 +50,7 @@ jobs:
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
           from invoice_pdf_fix import register_invoice_pdf_fix
+          from invoice_customer_fix import register_invoice_customer_fix
           from nav_upgrade import register_navigation_upgrade
           from ui_consistency import register_ui_consistency
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
@@ -55,6 +58,7 @@ jobs:
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
+          register_invoice_customer_fix(app.app, app.conn)
           register_navigation_upgrade()
           register_ui_consistency(app.app)
           client = app.app.test_client()
@@ -76,7 +80,14 @@ jobs:
           invoice = app.conn().execute('SELECT * FROM invoices WHERE id=?',(invoice_id,)).fetchone()
           assert round(invoice['total'],2) == 250.00
           assert client.get(f'/invoice/{invoice_id}').status_code == 200
-          pdf = client.get(f'/invoice/{invoice_id}.pdf'); assert pdf.status_code == 200 and pdf.mimetype == 'application/pdf'
+          pdf = client.get(f'/invoice/{invoice_id}.pdf'); assert pdf.status_code == 200 and pdf.mimetype == 'application/pdf'; assert pdf.data.startswith(b'%PDF-') and len(pdf.data) > 1000
+          new_customer = {'name':'Ny Kund Test','orgnr':'5599999999','vat_no':'SE559999999901','address':'Ny kundgatan 3','zip':'302 20','city':'Halmstad','email':'nykund@example.com','phone':'0700000000'}
+          r = client.post('/invoice/create-customer-inline', json=new_customer)
+          assert r.status_code == 200 and r.json['ok']
+          inline_id = r.json['id']
+          inline = app.conn().execute('SELECT * FROM customers WHERE id=?',(inline_id,)).fetchone()
+          assert inline['name']=='Ny Kund Test' and inline['address']=='Ny kundgatan 3' and inline['city']=='Halmstad'
+          assert client.get('/invoices/new').status_code == 200
           r = client.post(f'/invoice/{invoice_id}/issue', follow_redirects=False); assert r.status_code in (302, 303)
           c=app.conn()
           c.execute("INSERT INTO transactions(tx_key,date,reference,description,amount,balance,currency,source,status,suggested_account,suggested_vat,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",('TESTPAY','2026-09-20',str(invoice['number']),'Betalning faktura',250.0,250.0,'SEK','TEST','new','1930','', ''))
@@ -87,6 +98,8 @@ jobs:
           match=c.execute('SELECT voucher_id FROM invoice_payment_matches WHERE transaction_id=?',(tid,)).fetchone(); assert match and match['voucher_id']
           tx=c.execute('SELECT status,voucher_id FROM transactions WHERE id=?',(tid,)).fetchone(); assert tx['status']=='booked' and tx['voucher_id']==match['voucher_id']
           assert client.get('/invoice-payments').status_code == 200
+          print('INLINE_CUSTOMER_TEST_OK')
+          print('PDF_TEST_OK')
           print('INVOICE_PAYMENT_TEST_OK')
           print('UI_CONSISTENCY_TEST_OK')
           print('SMOKE_TEST_OK')
