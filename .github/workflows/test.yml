@@ -18,20 +18,66 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile Python files
-        run: python -m compileall -q app.py features.py run.py
-      - name: Import app and features
-        run: python -c "import app; from features import register_features; register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT); print('IMPORT_OK')"
-      - name: Flask smoke test
+        run: python -m compileall -q app.py features.py invoice_upgrade.py run.py
+      - name: Import full application
         run: |
           python - <<'PY'
           import app
           from features import register_features
+          from invoice_upgrade import register_invoice_upgrade
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
+          register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
+          print('IMPORT_OK')
+          PY
+      - name: Flask smoke and invoice test
+        run: |
+          python - <<'PY'
+          import app
+          from features import register_features
+          from invoice_upgrade import register_invoice_upgrade
+          register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
+          register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           client = app.app.test_client()
-          paths = ['/', '/customers', '/articles', '/invoices', '/quotes']
+          paths = ['/', '/customers', '/articles', '/invoices', '/quotes', '/invoice-settings', '/invoices/new']
           for path in paths:
               response = client.get(path)
               print(path, response.status_code)
               assert response.status_code < 500, f'{path} returned {response.status_code}'
+
+          for k, v in {
+              'company_name':'Testfirma', 'company_vat':'SE123456789001',
+              'company_address':'Testgatan 1', 'company_zip':'302 00', 'company_city':'Halmstad',
+              'accounting_method':'cash'
+          }.items():
+              app.set_setting(k, v)
+
+          r = client.post('/customers', data={
+              'name':'Testkund AB', 'orgnr':'5560000000', 'vat_no':'SE556000000001',
+              'address':'Kundgatan 2', 'zip':'302 10', 'city':'Halmstad'
+          }, follow_redirects=False)
+          assert r.status_code in (302, 303)
+          customer_id = app.conn().execute('SELECT id FROM customers ORDER BY id DESC LIMIT 1').fetchone()['id']
+
+          import json
+          lines = [{'description':'Testtjänst','quantity':2,'unit':'st','price_ex_vat':100,'vat_rate':25,'discount':0}]
+          r = client.post('/invoices/new', data={
+              'customer_id':customer_id, 'invoice_date':'2026-09-11', 'delivery_date':'2026-09-11',
+              'due_date':'2026-10-11', 'payment_terms_days':'30', 'currency':'SEK',
+              'buyer_vat_no':'SE556000000001', 'lines_json':json.dumps(lines), 'notes':'Test'
+          }, follow_redirects=False)
+          assert r.status_code in (302, 303)
+          invoice_id = app.conn().execute('SELECT id FROM invoices ORDER BY id DESC LIMIT 1').fetchone()['id']
+
+          r = client.get(f'/invoice/{invoice_id}')
+          assert r.status_code == 200
+          assert b'Kontrollera' in r.data
+          r = client.get(f'/invoice/{invoice_id}.pdf')
+          assert r.status_code == 200 and r.mimetype == 'application/pdf'
+
+          r = client.post(f'/invoice/{invoice_id}/issue', follow_redirects=False)
+          assert r.status_code in (302, 303)
+          row = app.conn().execute('SELECT status FROM invoices WHERE id=?',(invoice_id,)).fetchone()
+          assert row['status'] == 'unpaid'
+          print('INVOICE_TEST_OK')
           print('SMOKE_TEST_OK')
           PY
