@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile Python files
-        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py invoice_pdf_fix.py nav_upgrade.py run.py
+        run: python -m compileall -q app.py features.py invoice_upgrade.py invoice_hardening.py invoice_payment_upgrade.py invoice_pdf_fix.py nav_upgrade.py ui_consistency.py run.py
       - name: Import full application
         run: |
           python - <<'PY'
@@ -28,14 +28,18 @@ jobs:
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
           from invoice_pdf_fix import register_invoice_pdf_fix
+          from nav_upgrade import register_navigation_upgrade
+          from ui_consistency import register_ui_consistency
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
+          register_navigation_upgrade()
+          register_ui_consistency(app.app)
           print('IMPORT_OK')
           PY
-      - name: Flask smoke, invoice and payment test
+      - name: Flask smoke, invoice, payment and UI consistency test
         run: |
           python - <<'PY'
           import app, json
@@ -44,16 +48,22 @@ jobs:
           from invoice_hardening import register_invoice_hardening
           from invoice_payment_upgrade import register_invoice_payment_upgrade
           from invoice_pdf_fix import register_invoice_pdf_fix
+          from nav_upgrade import register_navigation_upgrade
+          from ui_consistency import register_ui_consistency
           register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
           register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
           register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
+          register_navigation_upgrade()
+          register_ui_consistency(app.app)
           client = app.app.test_client()
           for path in ['/', '/customers', '/articles', '/invoices', '/quotes', '/invoice-settings', '/invoices/new', '/invoice-payments']:
               response = client.get(path)
               print(path, response.status_code)
               assert response.status_code < 500, f'{path} returned {response.status_code}'
+              if 'text/html' in response.content_type:
+                  assert 'minbokforing-consistent-ui' in response.get_data(as_text=True), f'{path} missing unified UI theme'
           for k, v in {'company_name':'Testfirma','company_vat':'SE123456789001','company_address':'Testgatan 1','company_zip':'302 00','company_city':'Halmstad','accounting_method':'cash'}.items():
               app.set_setting(k, v)
           r = client.post('/customers', data={'name':'Testkund AB','orgnr':'5560000000','address':'Kundgatan 2','zip':'302 10','city':'Halmstad'}, follow_redirects=False)
@@ -78,5 +88,6 @@ jobs:
           tx=c.execute('SELECT status,voucher_id FROM transactions WHERE id=?',(tid,)).fetchone(); assert tx['status']=='booked' and tx['voucher_id']==match['voucher_id']
           assert client.get('/invoice-payments').status_code == 200
           print('INVOICE_PAYMENT_TEST_OK')
+          print('UI_CONSISTENCY_TEST_OK')
           print('SMOKE_TEST_OK')
           PY
