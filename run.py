@@ -6,6 +6,7 @@ from invoice_hardening import register_invoice_hardening
 from nav_upgrade import register_navigation_upgrade
 from invoice_payment_upgrade import register_invoice_payment_upgrade
 from invoice_pdf_fix import register_invoice_pdf_fix
+from invoice_customer_fix import register_invoice_customer_fix
 from ui_consistency import register_ui_consistency
 
 register_features(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
@@ -13,6 +14,7 @@ register_invoice_upgrade(app.app, app.conn, app.setting, app.set_setting, app.cr
 register_invoice_hardening(app.app, app.conn, app.setting, app.EXPORT)
 register_invoice_payment_upgrade(app.app, app.conn, app.setting, app.set_setting, app.create_voucher, app.money, app.AC, app.ROOT, app.EXPORT)
 register_invoice_pdf_fix(app.app, app.conn, app.setting, app.EXPORT)
+register_invoice_customer_fix(app.app, app.conn)
 register_navigation_upgrade()
 register_ui_consistency(app.app)
 
