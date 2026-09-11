@@ -1,4 +1,5 @@
 from flask import request, jsonify
+import datetime
 
 
 def register_invoice_customer_fix(app, conn):
@@ -17,12 +18,17 @@ def register_invoice_customer_fix(app, conn):
 
         c = conn()
         cols = {r['name'] for r in c.execute('PRAGMA table_info(customers)').fetchall()}
+        # The original customers table requires created to be non-null. Include it
+        # explicitly instead of relying on a database default that does not exist.
         fields = ['name']
         values = [name]
-        for key in ['orgnr', 'vat_no', 'address', 'zip', 'city', 'email', 'phone']:
+        for key in ['orgnr', 'vat_no', 'address', 'zip', 'city', 'email', 'phone', 'reference']:
             if key in cols:
                 fields.append(key)
                 values.append(val(key))
+        if 'created' in cols:
+            fields.append('created')
+            values.append(datetime.datetime.now().isoformat())
         placeholders = ','.join('?' for _ in fields)
         try:
             cur = c.execute(
