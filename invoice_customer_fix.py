@@ -1,9 +1,8 @@
-import json
 from flask import request, jsonify
 
 
 def register_invoice_customer_fix(app, conn):
-    """Allow creating a new customer directly from Ny faktura without breaking the existing invoice flow."""
+    """Allow creating a new customer directly from Ny faktura and make PDF links download."""
 
     @app.post('/invoice/create-customer-inline')
     def invoice_create_customer_inline():
@@ -36,16 +35,13 @@ def register_invoice_customer_fix(app, conn):
             c.rollback()
             return jsonify({'ok': False, 'error': f'Kunden kunde inte sparas: {exc}'}), 400
 
-    # Inject a small amount of JS after the existing invoice form is rendered.
-    # The existing page intentionally marks register-filled fields readonly; this
-    # upgrade makes them editable and adds a "Ny kund" flow while preserving the
-    # current invoice endpoint and accounting logic.
-    original_after = app.after_request_funcs.get(None, [])[:]
-
-    def inject_inline_customer(response):
+    def inject_invoice_upgrades(response):
         try:
-            if response.content_type and 'text/html' in response.content_type and request.path == '/invoices/new':
-                body = response.get_data(as_text=True)
+            if not response.content_type or 'text/html' not in response.content_type:
+                return response
+            body = response.get_data(as_text=True)
+
+            if request.path == '/invoices/new':
                 script = r'''<script id="mb-inline-customer-fix">
 (function(){
   const sel=document.getElementById('customer_id');
@@ -54,11 +50,11 @@ def register_invoice_customer_fix(app, conn):
     const o=document.createElement('option'); o.value='__new__'; o.textContent='+ Ny kund'; sel.appendChild(o);
   }
   const ids=['customer_name','customer_orgnr','buyer_vat_no','customer_address','customer_zip','customer_city','customer_email','customer_phone'];
-  function editable(isNew){ids.forEach(id=>{const e=document.getElementById(id);if(e){e.readOnly=!isNew;e.removeAttribute('readonly');if(!isNew)e.readOnly=true;}});}
+  function editable(isNew){ids.forEach(id=>{const e=document.getElementById(id);if(e){e.readOnly=!isNew;if(isNew)e.removeAttribute('readonly');}});}
   const old=window.selectCustomer;
   window.selectCustomer=function(id){
     if(id==='__new__'){
-      ids.forEach(id=>{const e=document.getElementById(id);if(e){e.readOnly=false;e.removeAttribute('readonly');if(id==='buyer_vat_no') e.value=''; else e.value='';}});
+      ids.forEach(id=>{const e=document.getElementById(id);if(e){e.readOnly=false;e.removeAttribute('readonly');e.value='';}});
       return;
     }
     if(typeof old==='function') old(id);
@@ -80,19 +76,23 @@ def register_invoice_customer_fix(app, conn):
         const opt=document.createElement('option');opt.value=String(d.id);opt.textContent=d.name;sel.appendChild(opt);sel.value=String(d.id);
         editable(false);
         if(typeof oldSubmit==='function' && !oldSubmit.call(form)) return;
-        form.submit();
+        HTMLFormElement.prototype.submit.call(form);
       }catch(e){alert('Kunden kunde inte sparas. Kontrollera anslutningen och försök igen.');}
     },true);
   }
 })();
 </script>'''
-                if '</body>' in body:
-                    body = body.replace('</body>', script + '</body>', 1)
-                else:
-                    body += script
-                response.set_data(body)
+                body = body.replace('</body>', script + '</body>', 1) if '</body>' in body else body + script
+
+            # The embedded desktop webview can show a blank PDF viewer page.
+            # Force the existing same-origin invoice PDF link to download instead.
+            if request.path.startswith('/invoice/') and not request.path.endswith('.pdf'):
+                body = body.replace('href="/invoice/', 'download="Faktura.pdf" href="/invoice/', 1)
+                body = body.replace("href='/invoice/", "download='Faktura.pdf' href='/invoice/", 1)
+
+            response.set_data(body)
         except Exception:
             pass
         return response
 
-    app.after_request(inject_inline_customer)
+    app.after_request(inject_invoice_upgrades)
